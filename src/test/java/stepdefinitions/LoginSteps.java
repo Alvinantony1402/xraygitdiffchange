@@ -33,6 +33,16 @@ public class LoginSteps {
             .when()
             .post("https://httpbin.org/post"); // placeholder endpoint
     }
+    
+    @When("the user enters valid credentialss")
+    public void the_user_enters_valid_credentialss() {
+        // Replace with your real login endpoint and payload.
+        loginResponse = given()
+            .header("Content-Type", "application/json")
+            .body("{\"username\":\"valid_user\",\"password\":\"pass12345\"}")
+            .when()
+            .post("https://httpbin.org/post"); // placeholder endpoint
+    }
 
     @Then("the user should be logged in")
     public void the_user_should_be_logged_in() {

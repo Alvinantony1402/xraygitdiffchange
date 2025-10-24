@@ -45,7 +45,7 @@ public class Hooks {
         utilHelper.authXray();
         
         // Use change-detection enabled method
-        utilHelper.createOrReuseTestWithChangeDetection("XRAYG", scenario);
+        utilHelper.createOrReuseTestWithChangeDetection("XRAYL", scenario);
         
         System.out.println("=== XRAY TESTS READY ===\n");
     }
