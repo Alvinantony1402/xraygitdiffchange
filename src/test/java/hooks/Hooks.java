@@ -1,49 +1,52 @@
 package hooks;
 
-import changes.FeatureScenarioChangeMap;
+import changes.FeatureScenarioChangeMap; // your detector class (CLI or JGit-backed)
 import io.cucumber.java.Before;
 
+import java.util.Collections;
 import java.util.Map;
 
 public class Hooks {
+  private static boolean once = false;
 
-  private static boolean done = false;
+  // Exposed immutable snapshot for other classes to read
+  private static Map<String, Map<String, String>> changeMap = Collections.emptyMap();
+
+  // Accessor for other code: feature -> (scenario -> flag)
+  public static Map<String, Map<String, String>> getChangeMap() {
+    return changeMap;
+  }
+
+  // Optional convenience: get flag by feature file name and scenario name
+  public static String getScenarioFlag(String featureFileName, String scenarioName) {
+    Map<String, String> scenarios = changeMap.get(featureFileName);
+    if (scenarios == null) return "UNCHANGED";
+    return scenarios.getOrDefault(scenarioName, "UNCHANGED");
+  }
 
   @Before(order = 0)
-  public void initLocalChangeMap() {
-    if (done) return;
-    done = true;
+  public void initMap() {
+    if (once) return;
+    once = true;
 
-    String from = System.getenv("FROM_COMMIT");
-    String to   = System.getenv("TO_COMMIT");
-    if (from == null || from.isBlank()) from = "HEAD~1";
-    if (to == null || to.isBlank()) to = "HEAD";
+    // Local-friendly defaults; override via env if needed
+    String from = envOrDefault("FROM_COMMIT", "HEAD~1");
+    String to   = envOrDefault("TO_COMMIT", "HEAD");
 
-    try {
-      String fromSha = run("git", "rev-parse", from).trim();
-      String toSha   = run("git", "rev-parse", to).trim();
-      System.out.println("Local diff FROM=" + from + " (" + fromSha + ") TO=" + to + " (" + toSha + ")");
-    } catch (Exception ignore) {
-      System.out.println("Note: unable to resolve SHAs; continuing with refs.");
-    }
+    // Build once and store
+    changeMap = FeatureScenarioChangeMap.build(from, to);
 
-    Map<String, Map<String, String>> map = FeatureScenarioChangeMap.build(from, to);
-
-    // Optional: print a compact report
-    int features = map.size();
-    int scenarios = map.values().stream().mapToInt(m -> m.size()).sum();
-    long n = map.values().stream().flatMap(m -> m.values().stream()).filter("NEW"::equals).count();
-    long c = map.values().stream().flatMap(m -> m.values().stream()).filter("CHANGED"::equals).count();
-    System.out.println("Local change map ready. features=" + features + " scenarios=" + scenarios +
+    // Summary log
+    int features = changeMap.size();
+    int scenarios = changeMap.values().stream().mapToInt(m -> m.size()).sum();
+    long n = changeMap.values().stream().flatMap(m -> m.values().stream()).filter("NEW"::equals).count();
+    long c = changeMap.values().stream().flatMap(m -> m.values().stream()).filter("CHANGED"::equals).count();
+    System.out.println("Change map ready. features=" + features + " scenarios=" + scenarios +
         " NEW=" + n + " CHANGED=" + c + " UNCHANGED=" + (scenarios - n - c));
   }
 
-  private static String run(String... cmd) throws Exception {
-    Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
-    try (java.io.InputStream is = p.getInputStream()) {
-      return new String(is.readAllBytes());
-    } finally {
-      p.waitFor();
-    }
+  private static String envOrDefault(String key, String def) {
+    String v = System.getenv(key);
+    return (v == null || v.isBlank()) ? def : v;
   }
 }
