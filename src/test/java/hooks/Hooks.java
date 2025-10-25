@@ -1,52 +1,43 @@
 package hooks;
 
+import changes.FeatureScenarioChangeMap;
 import io.cucumber.java.Before;
-import io.cucumber.java.Scenario;
-import stepdefinitions.utils;
 
 public class Hooks {
 
-    private static boolean changeTrackingInitialized = false;
-    private static boolean testsCreated = false;
-    private final utils utilHelper = new utils();
+  private static boolean initialized = false;
 
-    @Before(order = 0) // Initialize change tracking first (runs once for entire suite)
-    public void initializeChangeDetection() {
-        if (changeTrackingInitialized) return;
-        changeTrackingInitialized = true;
+  @Before(order = 0)
+  public void buildChangeMapOnce() {
+    if (initialized) return;
+    initialized = true;
 
-        String fromCommit = System.getenv("FROM_COMMIT");
-        String toCommit = System.getenv("TO_COMMIT");
+    // Ensure your local repo has latest remote refs if you rely on origin/main
+    // Run: git fetch origin (you can do this outside or here with ProcessBuilder)
 
-        if (fromCommit == null || fromCommit.isEmpty()) {
-            System.out.println("FROM_COMMIT not set, detecting from origin/main...");
-            fromCommit = util.GitDiffParser.getRemoteMainSha();
-        }
-        if (toCommit == null || toCommit.isEmpty()) {
-            toCommit = "HEAD";
-        }
+    String from = System.getenv("FROM_COMMIT");
+    String to = System.getenv("TO_COMMIT");
 
-        System.out.println("\n=== INITIALIZING CHANGE DETECTION ===");
-        System.out.println("FROM: " + fromCommit);
-        System.out.println("TO:   " + toCommit);
-        System.out.println("======================================\n");
-
-        utils.initializeChangeTracking(fromCommit, toCommit);
+    if (from == null || from.isBlank()) {
+      from = "origin/main";
+    }
+    if (to == null || to.isBlank()) {
+      to = "HEAD";
     }
 
-    @Before(order = 1) // Create/update tests after change detection (runs once)
-    public void prepareXrayTestOnce(Scenario scenario) {
-        if (testsCreated) return;
-        testsCreated = true;
+    System.out.println("Building feature-scenario change map:");
+    System.out.println("  FROM: " + from);
+    System.out.println("  TO:   " + to);
 
-        System.out.println("\n=== PREPARING XRAY TESTS ===");
-        
-        utilHelper.authJira();
-        utilHelper.authXray();
-        
-        // Use change-detection enabled method
-        utilHelper.createOrReuseTestWithChangeDetection("XRAYL", scenario);
-        
-        System.out.println("=== XRAY TESTS READY ===\n");
-    }
+    var map = FeatureScenarioChangeMap.build(from, to);
+
+    // Optional: quick summary printout
+    int features = map.size();
+    int scenarios = map.values().stream().mapToInt(m -> m.size()).sum();
+    long changed = map.values().stream().flatMap(m -> m.values().stream()).filter("CHANGED"::equals).count();
+    long added = map.values().stream().flatMap(m -> m.values().stream()).filter("NEW"::equals).count();
+
+    System.out.println("Map ready. Features=" + features + ", Scenarios=" + scenarios +
+        ", NEW=" + added + ", CHANGED=" + changed + ", UNCHANGED=" + (scenarios - added - changed));
+  }
 }
