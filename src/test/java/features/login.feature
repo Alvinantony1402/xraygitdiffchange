@@ -12,7 +12,7 @@ Feature: Login
     Then the user should be logged inn
     
     Scenario: Successful login0051
-    When the user enters valid credentials
+    When the user enters valid credentialss
     Then the user should be logged in
     
     Scenario: Successful login0052
