@@ -10,3 +10,7 @@ Then results related to "phone" should be shown
 Scenario: Search with mixed case keyword
 When the user searches for "LapTop"
 Then results related to "LapTop" should be shown
+
+Scenario: Search with mixed case 
+When the user searches for "LapTop"
+Then results related to "LapTop" should be shown
