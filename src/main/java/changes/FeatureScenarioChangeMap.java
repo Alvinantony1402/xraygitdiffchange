@@ -20,14 +20,15 @@ import java.util.*;
 
 public class FeatureScenarioChangeMap {
 
-  // Adjust to your project; or set FEATURES_ROOT env var.
+  // Point this to your features root; override via env FEATURES_ROOT if needed.
   private static final String FEATURES_ROOT = envOrDefault("FEATURES_ROOT", "src/test/java/features");
   private static final int HUNK_BUFFER_LINES = 1;
 
+  // Latest computed snapshot for reuse
   private static Map<String, Map<String, String>> lastComputed = Collections.emptyMap();
   public static Map<String, Map<String, String>> latest() { return lastComputed; }
 
-  // Local-friendly default: last commit vs HEAD
+  // Local default: compare last commit to HEAD
   public static Map<String, Map<String, String>> buildLocal() {
     String fromRef = envOrDefault("FROM_COMMIT", "HEAD~1");
     String toRef   = envOrDefault("TO_COMMIT", "HEAD");
@@ -51,7 +52,7 @@ public class FeatureScenarioChangeMap {
 
       final String repoRoot = repo.getWorkTree().getAbsolutePath().replace('\\', '/') + "/";
 
-      // 1) Read current working tree feature files
+      // 1) Parse current working tree features
       Map<String, List<String>> fileToLines = readAllFeatureFiles();
       Map<String, Map<String, LineRange>> fileScenarioRanges = new HashMap<>();
       Map<String, Set<String>> fileScenarioNames = new HashMap<>();
@@ -61,10 +62,19 @@ public class FeatureScenarioChangeMap {
         fileScenarioNames.put(e.getKey(), ranges.keySet());
       }
 
-      // 2) Diffs (for CHANGED and explicit ADD handling)
+      // 2) Diff entries between FROM and TO under FEATURES_ROOT
       List<DiffEntry> diffEntries = diffTree(repo, from, to, repoRoot, FEATURES_ROOT);
 
-      // 3) Initialize map to UNCHANGED for all current scenarios
+      // Track which feature files are ADDED (brand-new files)
+      Set<String> addedFeaturePaths = new HashSet<>();
+      for (DiffEntry de : diffEntries) {
+        if (de.getChangeType() == DiffEntry.ChangeType.ADD) {
+          String path = pathFromDiff(de, repoRoot);
+          if (path.endsWith(".feature")) addedFeaturePaths.add(path);
+        }
+      }
+
+      // 3) Initialize result map to UNCHANGED for all current scenarios (by feature filename)
       Map<String, Map<String, String>> result = new LinkedHashMap<>();
       for (String featurePath : fileScenarioNames.keySet()) {
         String featureName = Paths.get(featurePath).getFileName().toString();
@@ -75,40 +85,31 @@ public class FeatureScenarioChangeMap {
         result.put(featureName, scenarioMap);
       }
 
-      // 4) Build previous scenario-name sets for ALL current files
+      // 4) Build previous scenario name sets for all current feature files
       Map<String, Set<String>> previousScenarioNamesByFile = previousScenarioNamesForAll(
           repo, from, repoRoot, fileScenarioNames.keySet()
       );
 
-      // 5) Apply NEW/CHANGED using diff + previous-content
+      // 5) For brand-new feature files (ADDED), mark all scenarios as CHANGED (not NEW)
+      for (String addedPath : addedFeaturePaths) {
+        Set<String> currentScenarios = fileScenarioNames.getOrDefault(addedPath, Collections.emptySet());
+        for (String now : currentScenarios) {
+          mark(result, addedPath, now, "CHANGED");
+        }
+      }
+
+      // 6) Flag CHANGED for edits overlapping scenario ranges (all changed files)
       try (DiffFormatter df = new DiffFormatter(new ByteArrayOutputStream())) {
         df.setRepository(repo);
         df.setDetectRenames(true);
-
-        // First: mark added files quickly as NEW
-        Set<String> addedFeaturePaths = new HashSet<>();
-        for (DiffEntry de : diffEntries) {
-          if (de.getChangeType() == DiffEntry.ChangeType.ADD) {
-            String path = pathFromDiff(de, repoRoot);
-            if (path.endsWith(".feature")) {
-              addedFeaturePaths.add(path);
-            }
-          }
-        }
 
         for (DiffEntry de : diffEntries) {
           String path = pathFromDiff(de, repoRoot);
           if (!path.endsWith(".feature")) continue;
 
-          // Mark entire file NEW if it’s an added file
-          if (addedFeaturePaths.contains(path)) {
-            Set<String> currentScenarios = fileScenarioNames.getOrDefault(path, Collections.emptySet());
-            for (String now : currentScenarios) mark(result, path, now, "NEW");
-          }
-
-          // CHANGED by hunk overlap
           EditList edits = df.toFileHeader(de).toEditList();
           List<DiffHunk> hunks = toBufferedHunks(edits, HUNK_BUFFER_LINES);
+
           Map<String, LineRange> ranges = fileScenarioRanges.getOrDefault(path, Collections.emptyMap());
           for (DiffHunk h : hunks) {
             for (Map.Entry<String, LineRange> ent : ranges.entrySet()) {
@@ -120,16 +121,24 @@ public class FeatureScenarioChangeMap {
         }
       }
 
-      // 6) NEW via previous content comparison (for all current files)
+      // 7) For existing feature files, mark NEW when scenario name is present now but absent in FROM
       for (String path : fileScenarioNames.keySet()) {
+        if (addedFeaturePaths.contains(path)) {
+          // Entire file is new → already marked CHANGED; skip NEW marking for it
+          continue;
+        }
         Set<String> prev = previousScenarioNamesByFile.get(path);
         Set<String> currentScenarios = fileScenarioNames.getOrDefault(path, Collections.emptySet());
         if (prev == null) {
-          // File missing in FROM → every current scenario is NEW
-          for (String now : currentScenarios) mark(result, path, now, "NEW");
+          // File absent in FROM (shouldn’t occur since not in addedFeaturePaths), but handle defensively
+          for (String now : currentScenarios) {
+            mark(result, path, now, "CHANGED"); // treat as changed file
+          }
         } else {
           for (String now : currentScenarios) {
-            if (!prev.contains(now)) mark(result, path, now, "NEW");
+            if (!prev.contains(now)) {
+              mark(result, path, now, "NEW");
+            }
           }
         }
       }
@@ -154,7 +163,6 @@ public class FeatureScenarioChangeMap {
       try (DiffFormatter df = new DiffFormatter(new ByteArrayOutputStream())) {
         df.setRepository(repo);
         df.setDetectRenames(true);
-        // Use repo-relative filter
         String repoRelFilter = repoRelative(pathFilter, repoRoot);
         df.setPathFilter(org.eclipse.jgit.treewalk.filter.PathFilter.create(repoRelFilter));
         return df.scan(oldTree, newTree);
@@ -171,21 +179,8 @@ public class FeatureScenarioChangeMap {
   }
 
   private static String pathFromDiff(DiffEntry de, String repoRoot) {
-    // Prefer new path for adds/modifies; fallback to old path when needed
     String raw = de.getNewPath().equals(DiffEntry.DEV_NULL) ? de.getOldPath() : de.getNewPath();
-    // Produce working-tree style normalized absolute or relative, then normalize
-    String norm = normalize(raw);
-    // Convert to working-tree absolute-like to match current fileToLines keys
-    // Since readAllFeatureFiles() stores absolute-ish (or working-dir relative) normalized paths,
-    // we make both sides normalized and with FEATURES_ROOT prefix.
-    // Build a synthetic path prefixed by FEATURES_ROOT if diff path starts with that filter.
-    if (!norm.startsWith(FEATURES_ROOT)) {
-      // If your repo layout is standard, norm is already repo-relative (e.g., src/test/java/features/...)
-      // which matches our keys because we stored normalized file paths from Files.walk under FEATURES_ROOT.
-      // So return as-is; matching relies on same normalized relative string.
-      return norm;
-    }
-    return norm;
+    return normalize(raw);
   }
 
   // ---------- Parsing helpers ----------
@@ -204,7 +199,7 @@ public class FeatureScenarioChangeMap {
     return out;
   }
 
-  // Header-inclusive ranges: include the Scenario: line itself
+  // Include the Scenario header line itself in the range; end is next header or EOF
   private static Map<String, LineRange> computeScenarioRangesHeaderInclusive(List<String> lines) {
     Map<String, LineRange> ranges = new LinkedHashMap<>();
     String current = null;
@@ -217,7 +212,7 @@ public class FeatureScenarioChangeMap {
         }
         String name = t.replaceFirst("(?i)Scenario\\s*(Outline)?:\\s*", "").trim();
         current = name;
-        start = i + 1; // 1-based, include header line
+        start = i + 1; // 1-based index
       }
     }
     if (current != null && start >= 1) {
@@ -233,7 +228,6 @@ public class FeatureScenarioChangeMap {
   private static List<DiffHunk> toBufferedHunks(EditList edits, int buffer) {
     List<DiffHunk> out = new ArrayList<>();
     for (Edit e : edits) {
-      // new-file indices are [beginB, endB) 0-based
       int s = e.getBeginB() + 1;
       int eExclusive = e.getEndB() + 1;
       if (buffer > 0) {
@@ -254,7 +248,7 @@ public class FeatureScenarioChangeMap {
       if (repoPath == null) { out.put(currentPath, Collections.emptySet()); continue; }
       byte[] bytes = readBlobAt(repo, from, repoPath);
       if (bytes == null) {
-        // File did not exist in FROM → null sentinel (means whole file NEW)
+        // Absent at FROM (not in addedFeaturePaths due to diffs scope/filters or historical edge cases)
         out.put(currentPath, null);
         continue;
       }
