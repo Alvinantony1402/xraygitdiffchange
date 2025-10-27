@@ -15,12 +15,13 @@ import org.eclipse.jgit.diff.DiffEntry;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.nio.file.*;
 import java.util.*;
 
 public class FeatureScenarioChangeMap {
 
-  // Override with env FEATURES_ROOT if your features live elsewhere
   private static final String FEATURES_ROOT = envOrDefault("FEATURES_ROOT", "src/test/java/features");
   private static final int HUNK_BUFFER_LINES = 1;
 
@@ -50,7 +51,7 @@ public class FeatureScenarioChangeMap {
 
       final String repoRoot = repo.getWorkTree().getAbsolutePath().replace('\\', '/') + "/";
 
-      // 1) Current working tree: parse all feature files and scenario ranges
+      // 1) Parse current features
       Map<String, List<String>> fileToLines = readAllFeatureFiles();
       Map<String, Map<String, LineRange>> fileScenarioRanges = new HashMap<>();
       Map<String, Set<String>> fileScenarioNames = new HashMap<>();
@@ -60,18 +61,28 @@ public class FeatureScenarioChangeMap {
         fileScenarioNames.put(e.getKey(), ranges.keySet());
       }
 
-      // 2) Diff entries used for CHANGED and to identify brand-new feature files
+      // 2) Diffs
       List<DiffEntry> diffEntries = diffTree(repo, from, to, repoRoot, FEATURES_ROOT);
 
       Set<String> addedFeaturePaths = new HashSet<>();
       for (DiffEntry de : diffEntries) {
         if (de.getChangeType() == DiffEntry.ChangeType.ADD) {
           String path = pathFromDiff(de);
-          if (path.endsWith(".feature")) addedFeaturePaths.add(normalize(FEATURES_ROOT + "/" + Paths.get(path).getFileName().toString()).replace("//","/"));
+          if (path.endsWith(".feature")) {
+            // Normalize to the same form used as keys (current working tree path)
+            // Here we try to find by filename among current keys.
+            String filename = Paths.get(path).getFileName().toString();
+            for (String k : fileScenarioNames.keySet()) {
+              if (Paths.get(k).getFileName().toString().equalsIgnoreCase(filename)) {
+                addedFeaturePaths.add(k);
+                break;
+              }
+            }
+          }
         }
       }
 
-      // 3) Initialize all current scenarios to UNCHANGED
+      // 3) Init result as UNCHANGED
       Map<String, Map<String, String>> result = new LinkedHashMap<>();
       for (String featurePath : fileScenarioNames.keySet()) {
         String featureName = Paths.get(featurePath).getFileName().toString();
@@ -82,21 +93,20 @@ public class FeatureScenarioChangeMap {
         result.put(featureName, scenarioMap);
       }
 
-      // 4) Compute previous scenario-name set for EVERY current feature file
-      //    If blob is missing in FROM, set prev map value to null (file absent previously)
+      // 4) Previous names for every current file
       Map<String, Set<String>> previousScenarioNamesByFile = previousScenarioNamesForAll(
           repo, from, repoRoot, fileScenarioNames.keySet()
       );
 
-      // 5) Brand-new feature files → mark all scenarios as CHANGED (not NEW)
+      // 5) Brand-new feature files → CHANGED for all scenarios (policy)
       for (String addedPath : addedFeaturePaths) {
         Set<String> currentScenarios = fileScenarioNames.getOrDefault(addedPath, Collections.emptySet());
         for (String now : currentScenarios) {
-          mark(result, addedPath, now, "NEW");
+          mark(result, addedPath, now, "CHANGED");
         }
       }
 
-      // 6) CHANGED detection by diff hunk overlap against header-inclusive ranges
+      // 6) CHANGED via hunk overlap
       try (DiffFormatter df = new DiffFormatter(new ByteArrayOutputStream())) {
         df.setRepository(repo);
         df.setDetectRenames(true);
@@ -105,7 +115,6 @@ public class FeatureScenarioChangeMap {
           String path = normalize(pathFromDiff(de));
           if (!path.endsWith(".feature")) continue;
 
-          // Map diff path to current key path if necessary (based on filename)
           String currentKey = resolveCurrentFeatureKey(fileScenarioNames.keySet(), path);
           if (currentKey == null) continue;
 
@@ -123,25 +132,57 @@ public class FeatureScenarioChangeMap {
         }
       }
 
-      // 7) NEW-in-existing-file detection: compare current vs previous names for EVERY current file
+      // 7) NEW in existing files via name-set comparison
       for (String currentPath : fileScenarioNames.keySet()) {
         if (addedFeaturePaths.contains(currentPath)) {
-          // Entire file new → already CHANGED; skip NEW marking for file-level policy
-          continue;
+          continue; // keep CHANGED for brand-new files
         }
         Set<String> prevNames = previousScenarioNamesByFile.get(currentPath);
         Set<String> currentNames = fileScenarioNames.getOrDefault(currentPath, Collections.emptySet());
 
         if (prevNames == null) {
-          // File absent in FROM (rename/path filter anomalies); treat as changed file
+          // File appears missing previously; treat as CHANGED to avoid false NEW
           for (String now : currentNames) {
             mark(result, currentPath, now, "CHANGED");
           }
         } else {
-          // Mark scenarios present now but absent before as NEW
           for (String now : currentNames) {
             if (!prevNames.contains(now)) {
               mark(result, currentPath, now, "NEW");
+            }
+          }
+        }
+      }
+
+      // 8) NEW in existing files via unified diff header scan (additional signal)
+      Map<String, Set<String>> diffNewTitlesByFile = scanAddedScenarioTitles(fromRef, toRef);
+      if (!diffNewTitlesByFile.isEmpty()) {
+        for (Map.Entry<String, Set<String>> e : diffNewTitlesByFile.entrySet()) {
+          String featureFileName = e.getKey(); // filename only
+          if (featureFileName == null) continue;
+
+          // Find the currentPath key matching this filename
+          String currentPath = null;
+          for (String k : fileScenarioNames.keySet()) {
+            if (Paths.get(k).getFileName().toString().equalsIgnoreCase(featureFileName)) {
+              currentPath = k;
+              break;
+            }
+          }
+          if (currentPath == null) continue;
+          if (addedFeaturePaths.contains(currentPath)) continue; // brand-new file stays CHANGED by policy
+
+          Map<String, String> scenarioMap = result.get(Paths.get(currentPath).getFileName().toString());
+          if (scenarioMap == null) continue;
+
+          Set<String> titles = e.getValue();
+          for (String title : titles) {
+            // If a current scenario with this title exists and is not already CHANGED, mark NEW
+            if (scenarioMap.containsKey(title)) {
+              String cur = scenarioMap.get(title);
+              if (!"CHANGED".equals(cur)) {
+                scenarioMap.put(title, "NEW");
+              }
             }
           }
         }
@@ -155,7 +196,60 @@ public class FeatureScenarioChangeMap {
     }
   }
 
-  // ---------- JGit helpers ----------
+  // ---------- NEW helper: scan diff for added Scenario headers ----------
+  private static Map<String, Set<String>> scanAddedScenarioTitles(String fromRef, String toRef) {
+    Map<String, Set<String>> byFile = new HashMap<>();
+    Process p = null;
+    try {
+      // Use ProcessBuilder to be shell-agnostic; the pattern is passed after "--"
+      p = new ProcessBuilder("git", "diff", fromRef, toRef, "--", "*.feature")
+              .redirectErrorStream(true)
+              .start();
+
+      String currentFileName = null; // from "+++ b/<path>"
+      try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+        String raw;
+        while ((raw = r.readLine()) != null) {
+          String line = raw.trim();
+
+          // Track the current diff target file via "+++ b/<path>"
+          if (line.startsWith("+++ ")) {
+            // Example: "+++ b/src/test/java/features/login.feature"
+            int idx = line.indexOf("b/");
+            if (idx >= 0) {
+              String path = line.substring(idx + 2).trim();
+              currentFileName = Paths.get(path).getFileName().toString();
+            } else {
+              currentFileName = null;
+            }
+            continue;
+          }
+
+          if (!line.startsWith("+")) continue;    // only additions
+          if (line.startsWith("+++ ")) continue;  // skip file header line itself
+
+          String added = line.substring(1).trim(); // without '+'
+          if (added.regionMatches(true, 0, "Scenario:", 0, 9) ||
+              added.regionMatches(true, 0, "Scenario Outline:", 0, 17)) {
+
+            // Extract title after header
+            String title = added.replaceFirst("(?i)^Scenario\\s*(Outline)?:\\s*", "").trim();
+            if (!title.isEmpty() && currentFileName != null) {
+              byFile.computeIfAbsent(currentFileName, k -> new LinkedHashSet<>()).add(title);
+            }
+          }
+        }
+      }
+      p.waitFor();
+    } catch (Exception e) {
+      System.out.println("Note: diff scan skipped due to: " + e.getMessage());
+    } finally {
+      if (p != null) p.destroy();
+    }
+    return byFile;
+  }
+
+  // ---------- JGit helpers (unchanged) ----------
 
   private static List<DiffEntry> diffTree(Repository repo, ObjectId from, ObjectId to, String repoRoot, String pathFilter) throws IOException {
     try (RevWalk rw = new RevWalk(repo)) {
@@ -186,8 +280,6 @@ public class FeatureScenarioChangeMap {
     String raw = de.getNewPath().equals(DiffEntry.DEV_NULL) ? de.getOldPath() : de.getNewPath();
     return normalize(raw);
   }
-
-  // ---------- Parsing helpers ----------
 
   private static Map<String, List<String>> readAllFeatureFiles() throws IOException {
     Map<String, List<String>> out = new LinkedHashMap<>();
@@ -276,7 +368,6 @@ public class FeatureScenarioChangeMap {
     }
   }
 
-  // Match diff path to current path by filename if the path roots differ
   private static String resolveCurrentFeatureKey(Set<String> currentKeys, String diffRepoRelPath) {
     String diffFileName = Paths.get(diffRepoRelPath).getFileName().toString();
     for (String k : currentKeys) {
@@ -284,7 +375,6 @@ public class FeatureScenarioChangeMap {
         return k;
       }
     }
-    // fallback if exact match exists
     for (String k : currentKeys) {
       if (normalize(k).endsWith(normalize(diffRepoRelPath))) return k;
     }
@@ -295,7 +385,7 @@ public class FeatureScenarioChangeMap {
     String featureName = Paths.get(featurePath).getFileName().toString();
     Map<String, String> scenarioMap = result.computeIfAbsent(featureName, k -> new LinkedHashMap<>());
     String cur = scenarioMap.get(scenarioName);
-    if ("NEW".equals(cur) || "CHANGED".equals(cur)) return; // keep strongest
+    if ("NEW".equals(cur) || "CHANGED".equals(cur)) return;
     scenarioMap.put(scenarioName, status);
   }
 
@@ -307,7 +397,7 @@ public class FeatureScenarioChangeMap {
     if (absOrRelPath == null) return null;
     String norm = normalize(absOrRelPath);
     if (norm.startsWith(repoRoot)) return norm.substring(repoRoot.length());
-    return norm; // assume already repo-relative
+    return norm;
   }
 
   private static String envOrDefault(String key, String def) {
@@ -315,7 +405,6 @@ public class FeatureScenarioChangeMap {
     return (v == null || v.isBlank()) ? def : v;
   }
 
-  // Small types
   private static final class LineRange {
     final int start; // inclusive 1-based
     final int end;   // exclusive
