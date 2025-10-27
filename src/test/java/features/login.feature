@@ -30,5 +30,9 @@ Feature: Login
       Scenario: Successful login00555
     When the user enters valid credentialss
     Then the user should be logged in
+    
+      Scenario: Successful login00556
+    When the user enters valid credentialss
+    Then the user should be logged in
    
     
