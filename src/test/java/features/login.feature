@@ -27,6 +27,6 @@ Feature: Login
     When the user enters valid credentialss
     Then the user should be logged in
     
-      Scenario: Successful login0054s
+      Scenario: Successful login00545
     When the user enters valid credentialss
     Then the user should be logged in
